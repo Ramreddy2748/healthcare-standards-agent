@@ -37,7 +37,6 @@ medlaunch_AI/
 │   │   ├── embeddings.ts
 │   │   └── standards.service.ts
 │   └── utils/
-│       ├── cost-estimation.ts
 │       └── formatting.ts
 ├── .env.example
 ├── package.json
@@ -101,11 +100,6 @@ EMBEDDING_REQUEST_DELAY_MS=250
 EMBEDDING_MAX_RETRIES=5
 EMBEDDING_RETRY_DELAY_MS=5000
 
-EMBEDDING_COST_PER_1M_TOKENS=0
-LLM_INPUT_COST_PER_1M_TOKENS=0
-LLM_OUTPUT_COST_PER_1M_TOKENS=0
-ESTIMATED_LLM_COMPLETION_TOKENS=0
-
 RESET_COLLECTION=false
 DRY_RUN=false
 MAX_CHUNKS=0
@@ -114,7 +108,6 @@ MAX_CHUNKS=0
 Notes:
 
 - `MAX_CHUNKS=0` means no seed limit.
-- If pricing values stay `0`, the system still shows token estimates but dollar estimates remain zero.
 
 ## MCP Tools
 
@@ -168,7 +161,6 @@ flowchart TD
 - `src/services/embeddings.ts`: query embedding generation
 - `src/db/mongo.ts`: MongoDB connection and collection access
 - `src/utils/formatting.ts`: evidence formatting and chapter reconstruction
-- `src/utils/cost-estimation.ts`: token and cost estimation per query
 
 ## Data Model
 
@@ -256,35 +248,6 @@ The seeder uses section-first chunking rather than SR-only slicing.
 - makes exact chapter reconstruction cleaner
 - limits duplicated overlap text
 
-## Cost Tracking
-
-The connector now logs and returns an `estimated_cost` block for each query.
-
-Included estimates:
-
-- embedding tokens used for semantic search queries
-- estimated LLM prompt tokens based on query plus MCP response size
-- optional estimated LLM completion tokens from env configuration
-- estimated USD cost when pricing values are configured
-
-Important limitation:
-
-- this server does not call the final LLM directly, so LLM cost is an estimate of downstream consumption, not an exact billed amount from this process
-
-Example:
-
-```text
-estimated_cost:
-pricing_configured: true
-embedding_tokens_estimate: 18
-llm_prompt_tokens_estimate: 264
-llm_completion_tokens_estimate: 150
-embedding_cost_usd_estimate: 0.000002
-llm_prompt_cost_usd_estimate: 0.000132
-llm_completion_cost_usd_estimate: 0.000075
-total_cost_usd_estimate: 0.000209
-```
-
 ## Scalability Plan
 
 To scale this from the current single-document prototype to 50+ documents and 10,000+ chunks, the main changes would be:
@@ -318,7 +281,6 @@ To scale this from the current single-document prototype to 50+ documents and 10
 
 - keep metadata filtering, candidate generation, ranking, and formatting as separate stages
 - add structured response metadata if you later want analytics dashboards or richer clients
-- move cost and query telemetry into centralized logging for monitoring
 
 ## Testing
 
@@ -391,13 +353,12 @@ Very small SR-only chunks improved precision but often lost context. Section-fir
 
 ### Conservative embedding controls
 
-Batch limits, retry delays, and cost estimation make seeding slower but more predictable and easier to operate.
+Batch limits and retry delays make seeding slower but more predictable and easier to operate.
 
 ## Known Limitations
 
 - answer quality still depends on the downstream model following retrieved evidence faithfully
 - PDF extraction artifacts may still survive in some edge cases
-- LLM cost is estimated, not directly metered from the client runtime
 - the automated tests are still a lightweight smoke suite, not a full regression suite
 
 ## Troubleshooting

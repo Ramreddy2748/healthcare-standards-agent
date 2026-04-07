@@ -249,7 +249,7 @@ The seeder uses section-first chunking rather than SR-only slicing.
 - overlap: about `60` tokens only when splitting oversized units
 - ordering metadata is preserved for exact chapter reconstruction
 
-Why this approach:
+**Why this approach:**
 
 - keeps more context for embeddings
 - reduces fragmented answers
@@ -444,3 +444,4 @@ Manual artifacts still useful for final submission:
 - Atlas collection screenshot
 - Atlas vector index screenshot
 - MCP client screenshots or screen recording
+- Demo recording: https://drive.google.com/file/d/1_KRqlbhahAX-bXnzOPrjN8bnw4uvVQJI/view?usp=sharing

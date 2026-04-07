@@ -1,7 +1,10 @@
 import { getStandardsCollection, SEARCH_INDEX_NAME } from '../db/mongo';
 import { generateQueryEmbedding } from './embeddings';
+import { estimateQueryCost, formatQueryCostEstimate, logQueryCost } from '../utils/cost-estimation';
 import { connectorHeader, formatEvidence, renderVerbatimChapter } from '../utils/formatting';
 
+// INTERFACE IS A SHAPE OF AN OBJECT: it describes the structure that an object should have, the properties it should contain and their types
+// StandardDocument describes the shape of a standard document object that will be returned from the standards collection in the database
 export interface StandardDocument {
   chunk_id: string;
   text: string;
@@ -22,6 +25,7 @@ export interface StandardDocument {
   score?: number;
 }
 
+
 export interface SearchResultPayload {
   results: StandardDocument[];
   usedVectorSearch: boolean;
@@ -29,6 +33,10 @@ export interface SearchResultPayload {
 
 export const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 5;
+const DEFAULT_EVIDENCE_COUNT = 3;
+const SEARCH_OVERFETCH_MULTIPLIER = 5;
+const MIN_SEARCH_FETCH_LIMIT = 20;
+const MAX_SEARCH_FETCH_LIMIT = 40;
 const MAX_CHAPTER_RESULTS = 200;
 const COMMON_QUERY_TERMS = new Set([
   'about',
@@ -70,20 +78,25 @@ const NON_PREFIX_WORDS = new Set([
   'what'
 ]);
 
+// escapeRegex escapes special characters in a string so that it can be safely used in a regular expression
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// normalizeChapterInput normalizes a chapter reference string by trimming whitespace, converting to uppercase, and removing internal whitespace
 function normalizeChapterInput(value: string): string {
   return value.trim().toUpperCase().replace(/\s+/g, '');
 }
 
+
 function extractChapterReferences(query: string): string[] {
-  const numberedMatches = query.match(/\b[A-Z]{2,4}\.\d+(?:\.\d+)*\b/gi) ?? [];
-  const appendixMatches = query.match(/\b[A-Z]{2,4}-[A-Z]{1,3}\b/gi) ?? [];
+  const numberedMatches = query.match(/\b[A-Z]{2,4}\.\d+(?:\.\d+)*\b/gi) ?? []; // it is for QM.1 or LS.2 or IC.10
+  const appendixMatches = query.match(/\b[A-Z]{2,4}-[A-Z]{1,3}\b/gi) ?? []; // it is for appendix references like QM-A or LS-B or PH-GR
   return [...new Set([...numberedMatches, ...appendixMatches].map((match) => normalizeChapterInput(match)))];
 }
 
+
+// for particularly queries with QM chapter references like "QM chapters"
 function extractChapterPrefix(query: string): string | null {
   const match = query.match(/\b([A-Z]{2,4})\s+chapters\b/i);
   if (!match) {
@@ -98,11 +111,11 @@ function extractChapterPrefix(query: string): string | null {
   return candidate;
 }
 
+
 function isExplicitChapterLookupQuery(query: string, chapterReferences: string[]): boolean {
   if (chapterReferences.length === 0) {
     return false;
   }
-
   return /(exact|verbatim|full text|full chapter|entire chapter|complete chapter|show .*chapter|give me .*chapter|provide .*chapter)/i.test(query);
 }
 
@@ -110,6 +123,17 @@ function isExactWordingQuery(query: string): boolean {
   return /(exact wording|exact text|verbatim|quote|show me the exact|show the exact|exact language)/i.test(query);
 }
 
+function isSemanticExplanationQuery(query: string): boolean {
+  return /(explain|describe|summarize|summary|overview|tell me about|what is|what are|requirements for|how does|how do)/i.test(query);
+}
+
+function isMixedSemanticAndChapterQuery(query: string, chapterReferences: string[]): boolean {
+  return chapterReferences.length > 0
+    && isSemanticExplanationQuery(query)
+    && isExplicitChapterLookupQuery(query, chapterReferences);
+}
+
+// chapter look up helper to determine if a query should short circuit to returning the exact chapter text
 function shouldShortCircuitToExactChapter(query: string, chapterReferences: string[]): boolean {
   if (chapterReferences.length !== 1 || !isExplicitChapterLookupQuery(query, chapterReferences)) {
     return false;
@@ -124,6 +148,8 @@ function shouldShortCircuitToExactChapter(query: string, chapterReferences: stri
   return remainingTerms.length === 0;
 }
 
+// extractQueryTerms extracts the significant query terms from a query string by lowercasing the string,
+// matching sequences of at least 3 alphabetic characters, and filtering out common query terms
 function extractQueryTerms(query: string): string[] {
   const terms = query
     .toLowerCase()
@@ -131,6 +157,7 @@ function extractQueryTerms(query: string): string[] {
 
   return [...new Set(terms.filter((term) => !COMMON_QUERY_TERMS.has(term)))];
 }
+
 
 function extractDirectQuotes(results: StandardDocument[], query: string): Array<{ chapter: string; section: string; quote: string }> {
   const queryTerms = extractQueryTerms(query);
@@ -356,6 +383,10 @@ async function suggestChapters(chapter: string): Promise<string[]> {
 async function runSemanticSearch(query: string, limit: number): Promise<SearchResultPayload> {
   const collection = await getStandardsCollection<StandardDocument>();
   const queryEmbedding = await generateQueryEmbedding(query);
+  const fetchLimit = Math.min(
+    Math.max(limit * SEARCH_OVERFETCH_MULTIPLIER, MIN_SEARCH_FETCH_LIMIT),
+    MAX_SEARCH_FETCH_LIMIT
+  );
 
   if (!queryEmbedding) {
     const regex = new RegExp(query.split(/\s+/).filter(Boolean).map(escapeRegex).join('|'), 'i');
@@ -369,7 +400,7 @@ async function runSemanticSearch(query: string, limit: number): Promise<SearchRe
           { 'metadata.sr_id': regex }
         ]
       })
-      .limit(limit)
+      .limit(fetchLimit)
       .toArray() as StandardDocument[];
     return { results, usedVectorSearch: false };
   }
@@ -380,8 +411,8 @@ async function runSemanticSearch(query: string, limit: number): Promise<SearchRe
         index: SEARCH_INDEX_NAME,
         path: 'embedding',
         queryVector: queryEmbedding,
-        numCandidates: Math.max(limit * 10, 20),
-        limit
+        numCandidates: Math.max(fetchLimit * 10, 50),
+        limit: fetchLimit
       }
     },
     {
@@ -411,10 +442,26 @@ async function runSemanticSearch(query: string, limit: number): Promise<SearchRe
           { 'metadata.sr_id': regex }
         ]
       })
-      .limit(limit)
+      .limit(fetchLimit)
       .toArray() as StandardDocument[];
     return { results, usedVectorSearch: false };
   }
+}
+
+function appendCostEstimate(response: string, queryText: string, usedEmbedding: boolean, context: string): string {
+  const estimate = estimateQueryCost({
+    queryText,
+    responseText: response,
+    usedEmbedding
+  });
+
+  logQueryCost(context, estimate);
+
+  return [
+    response,
+    '',
+    formatQueryCostEstimate(estimate)
+  ].join('\n\n');
 }
 
 export async function searchStandards(query: string, limit: number = DEFAULT_SEARCH_LIMIT): Promise<string> {
@@ -423,62 +470,77 @@ export async function searchStandards(query: string, limit: number = DEFAULT_SEA
     if (chapterPrefix) {
       const chapters = await listChaptersByPrefix(chapterPrefix);
       if (chapters.length === 0) {
-        return [
+        return appendCostEstimate([
           connectorHeader('semantic-search'),
           `query: ${query}`,
           'note: No chapters found for that section prefix.',
           'suggestion: Try asking for an exact chapter like QM.1 or use a broader natural-language question.'
-        ].join('\n');
+        ].join('\n'), query, false, 'search_standards');
       }
 
-      return [
+      return appendCostEstimate([
         connectorHeader('semantic-search'),
         `query: ${query}`,
         `section_prefix: ${chapterPrefix}`,
         '',
         ...chapters.map((chapter) => `- ${chapter}`)
-      ].join('\n');
+      ].join('\n'), query, false, 'search_standards');
     }
 
     const chapterReferences = extractChapterReferences(query);
+    if (isMixedSemanticAndChapterQuery(query, chapterReferences)) {
+      return appendCostEstimate([
+        connectorHeader('semantic-search'),
+        `query: ${query}`,
+        'note: This query mixes a semantic explanation request with an exact chapter lookup.',
+        'suggestion: Ask the explanation as one semantic query, then use get_standard_by_chapter for the exact chapter text.'
+      ].join('\n'), query, false, 'search_standards');
+    }
+
     if (shouldShortCircuitToExactChapter(query, chapterReferences)) {
       return getStandardsByChapter(chapterReferences[0]);
+    }
+
+    if (chapterReferences.length > 0 && isExactWordingQuery(query)) {
+      return appendCostEstimate([
+        connectorHeader('semantic-search'),
+        `query: ${query}`,
+        'note: Exact wording requests should use chapter lookup rather than semantic search output.',
+        'suggestion: Use get_standard_by_chapter for a single chapter or get_standards_by_chapter for explicit chapter retrieval.'
+      ].join('\n'), query, false, 'search_standards');
     }
 
     const normalizedLimit = Number.isFinite(limit) ? Math.trunc(limit) : DEFAULT_SEARCH_LIMIT;
     const effectiveLimit = Math.min(Math.max(normalizedLimit, 1), MAX_SEARCH_LIMIT);
     const { results, usedVectorSearch } = await runSemanticSearch(query, effectiveLimit);
     const relevantResults = rankDocuments(filterRelevantResults(results)).slice(0, effectiveLimit);
+    const evidenceResults = relevantResults.slice(0, Math.min(relevantResults.length, DEFAULT_EVIDENCE_COUNT));
 
     if (relevantResults.length === 0) {
-      return `${connectorHeader('semantic-search')}No standards found matching your query.`;
-    }
-
-    const exactChapterPayloads: string[] = [];
-    for (const chapter of chapterReferences) {
-      exactChapterPayloads.push(await getStandardsByChapter(chapter));
+      return appendCostEstimate(`${connectorHeader('semantic-search')}No standards found matching your query.`, query, usedVectorSearch, 'search_standards');
     }
 
     if (isOutOfScopeQuery(query, relevantResults)) {
-      return [
+      return appendCostEstimate([
         connectorHeader('semantic-search'),
         `query: ${query}`,
         'note: This question appears to be outside the currently indexed knowledge base or lacks strong support in the retrieved standards.',
         'suggestion: Ask about a known chapter or a topic covered by the indexed standards collection.',
         '',
-        ...relevantResults.slice(0, 2).map((doc, index) => [`nearest evidence ${index + 1}`, formatEvidence(doc, true)].join('\n'))
-      ].join('\n\n');
+        ...evidenceResults.slice(0, 2).map((doc, index) => [`nearest evidence ${index + 1}`, formatEvidence(doc, true, 280)].join('\n'))
+      ].join('\n\n'), query, usedVectorSearch, 'search_standards');
     }
 
     const exactQuotes = isExactWordingQuery(query)
       ? extractDirectQuotes(relevantResults, query)
       : [];
 
-    return [
+    return appendCostEstimate([
       connectorHeader('semantic-search'),
       `query: ${query}`,
       `matches: ${relevantResults.length}`,
       `retrieval_mode: ${usedVectorSearch ? 'vector-search' : 'text-fallback'}`,
+      'response_mode: concise-evidence',
       ...(exactQuotes.length > 0 ? [
         '',
         'direct_quotes:',
@@ -490,13 +552,8 @@ export async function searchStandards(query: string, limit: number = DEFAULT_SEA
         ].join('\n'))
       ] : []),
       '',
-      ...relevantResults.map((doc, index) => [`evidence ${index + 1}`, formatEvidence(doc, true)].join('\n')),
-      ...(exactChapterPayloads.length > 0 ? [
-        '',
-        'explicit chapter requests:',
-        ...exactChapterPayloads
-      ] : [])
-    ].join('\n\n');
+      ...evidenceResults.map((doc, index) => [`evidence ${index + 1}`, formatEvidence(doc, true, 280)].join('\n'))
+    ].join('\n\n'), query, usedVectorSearch, 'search_standards');
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return `Error searching standards: ${errorMsg}`;
@@ -515,7 +572,7 @@ export async function getStandardsByChapter(chapter: string): Promise<string> {
     if (results.length === 0) {
       const suggestions = await suggestChapters(normalizedChapter);
       const fallback = await searchStandards(normalizedChapter, 3);
-      return [
+      return appendCostEstimate([
         connectorHeader('chapter-lookup'),
         `chapter: ${normalizedChapter}`,
         'exact_match: false',
@@ -527,10 +584,10 @@ export async function getStandardsByChapter(chapter: string): Promise<string> {
         ] : []),
         '',
         fallback
-      ].join('\n');
+      ].join('\n'), normalizedChapter, false, 'get_standard_by_chapter');
     }
 
-    return [
+    return appendCostEstimate([
       connectorHeader('chapter-lookup'),
       `document: ${results[0]?.metadata?.document ?? 'NIAHO Standards'}`,
       `section: ${results[0]?.metadata?.section ?? 'unknown'}`,
@@ -538,7 +595,7 @@ export async function getStandardsByChapter(chapter: string): Promise<string> {
       'exact_match: true',
       '',
       renderVerbatimChapter(results)
-    ].join('\n\n');
+    ].join('\n\n'), normalizedChapter, false, 'get_standard_by_chapter');
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return `Error retrieving standards: ${errorMsg}`;
@@ -552,10 +609,10 @@ export async function getStandardByChunkId(chunkId: string): Promise<string> {
     const doc = await collection.findOne({ chunk_id: normalizedChunkId }) as StandardDocument | null;
 
     if (!doc) {
-      return `${connectorHeader('chunk-id-lookup')}No standard found for chunk_id ${normalizedChunkId}.`;
+      return appendCostEstimate(`${connectorHeader('chunk-id-lookup')}No standard found for chunk_id ${normalizedChunkId}.`, normalizedChunkId, false, 'get_standard_by_chunk_id');
     }
 
-    return [
+    return appendCostEstimate([
       connectorHeader('chunk-id-lookup'),
       `document: ${doc.metadata?.document ?? 'NIAHO Standards'}`,
       `section: ${doc.metadata?.section ?? 'unknown'}`,
@@ -565,7 +622,7 @@ export async function getStandardByChunkId(chunkId: string): Promise<string> {
       `chunk_id: ${doc.chunk_id}`,
       '',
       doc.text.trim()
-    ].join('\n\n');
+    ].join('\n\n'), normalizedChunkId, false, 'get_standard_by_chunk_id');
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return `Error retrieving standard by chunk_id: ${errorMsg}`;
@@ -578,7 +635,7 @@ export async function listSections(sectionFilter?: string): Promise<string> {
     const chapters = (await collection.distinct('metadata.chapter')) as string[];
 
     if (chapters.length === 0) {
-      return `${connectorHeader('section-list')}No chapters found in the database.`;
+      return appendCostEstimate(`${connectorHeader('section-list')}No chapters found in the database.`, sectionFilter ?? 'list_sections', false, 'list_sections');
     }
 
     const normalizedFilter = sectionFilter?.trim().toLowerCase();
@@ -611,19 +668,19 @@ export async function listSections(sectionFilter?: string): Promise<string> {
     }
 
     if (filteredChapters.length === 0) {
-      return [
+      return appendCostEstimate([
         connectorHeader('section-list'),
         `section_filter: ${sectionFilter}`,
         'No matching sections or chapters found.'
-      ].join('\n');
+      ].join('\n'), sectionFilter ?? 'list_sections', false, 'list_sections');
     }
 
-    return [
+    return appendCostEstimate([
       connectorHeader('section-list'),
       ...(sectionFilter ? [`section_filter: ${sectionFilter}`] : []),
       'chapters:',
       ...filteredChapters.map((chapter) => `- ${chapter}`)
-    ].join('\n');
+    ].join('\n'), sectionFilter ?? 'list_sections', false, 'list_sections');
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     return `Error listing sections: ${errorMsg}`;

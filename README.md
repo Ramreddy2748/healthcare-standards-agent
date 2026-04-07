@@ -1,64 +1,34 @@
 # Healthcare Standards Agent
 
-The project ingests the DNV NIAHO hospital standards PDF, stores section-aware vectorized chunks in MongoDB Atlas, and exposes an MCP server for exact chapter lookup, section discovery, and semantic search.
+This project ingests the DNV NIAHO hospital standards PDF, stores chapter-aware vectorized chunks in MongoDB Atlas, and exposes an MCP server for:
 
-This implementation was validated using Claude MCP workflows using the Claude connector with different tools.
+- semantic search over the standards corpus
+- exact chapter lookup
+- section and chapter discovery
 
-## Deliverables Checklist
+The current seeded corpus contains `755` chunks across `184` chapters.
 
-Implemented in this repository:
+## What It Does
 
-- `seed-database.ts` for PDF ingestion, chunking, embeddings, and MongoDB insert
-- `src/mcp-server.ts` for the MCP server and tool exposure
-- `package.json` and `tsconfig.json` for project configuration
-- `.env.example` for required environment variables
-- `README.md` for setup, architecture, and design decisions
-- `TEST_RESULTS.md` for the required Q&A, citation, and edge-case outputs
+The system supports two retrieval modes:
 
-Manual assets still to add before final submission package review:
+- Semantic retrieval for natural-language questions such as "What are the staff competency assessment requirements?"
+- Exact retrieval for prompts such as "Show me chapter QM.1"
 
-- Atlas cluster screenshot
-- Atlas collection screenshot
-- Atlas vector search index screenshot
-- Claude/Desktop or other MCP-client usage screenshots or screen recording
+Core behavior:
 
-Suggested location for those manual assets:
-
-- `docs/screenshots/`
-
-## What This Project Does
-
-- Parses the source PDF and maps standards into chapter-aware records
-- Chunks content using section-first packing with overlap only inside split sections
-- Generates real embeddings with MongoDB Atlas AI Models / Voyage
-- Stores vectors and metadata in MongoDB Atlas
-- Exposes MCP tools for:
-  - semantic search
-  - exact chapter retrieval
-  - exact chunk retrieval
-  - section and chapter listing
-- Supports dual retrieval modes:
-  - exact citation mode for chapter/chunk lookups
-  - semantic retrieval mode for natural-language questions
-
-## Current Status
-
-- Atlas vector search is configured and working
-- Seeder is reproducible and supports dry runs
-- Current corpus shape after the latest reseed: `755` documents across `184` chapters
-- Exact chapter reconstruction includes overlap cleanup and PDF artifact cleanup at render time
+- parses the source PDF
+- chunks content using a section-first strategy
+- generates embeddings with Atlas AI Models / Voyage
+- stores vectors and structured metadata in MongoDB Atlas
+- exposes MCP tools for search and exact lookup
+- formats evidence for downstream MCP clients
 
 ## Repository Layout
 
 ```text
 medlaunch_AI/
 ├── seed-database.ts
-├── vector-search-test.ts
-├── mcp-server.ts
-├── testing/
-│   ├── assertions.ts
-│   ├── run-all.ts
-│   └── smoke-test.ts
 ├── src/
 │   ├── mcp-server.ts
 │   ├── db/
@@ -67,71 +37,32 @@ medlaunch_AI/
 │   │   ├── embeddings.ts
 │   │   └── standards.service.ts
 │   └── utils/
+│       ├── cost-estimation.ts
 │       └── formatting.ts
-├── docs/
-│   └── screenshots/
-│       └── README.md
 ├── .env.example
 ├── package.json
 ├── TEST_RESULTS.md
-├── tsconfig.json
+├── architecture-flow.svg
 └── README.md
 ```
 
-## Architecture
+## Quick Start
 
-### Data Flow
-
-1. `seed-database.ts` reads the NIAHO PDF.
-2. The seeder extracts chapter sections and normalizes them into chapter records.
-3. Chapters are split by section/subsection first.
-4. Oversized sections are further split into paragraph or bullet-group units.
-5. Overlap is applied only when a single oversized unit must be split.
-6. Embeddings are generated in conservative batches.
-7. Chunk records are written to MongoDB Atlas.
-8. The MCP server retrieves either:
-   - exact chapter/chunk content, or
-   - semantic matches from Atlas `$vectorSearch`.
-
-### Runtime Components
-
-- `src/mcp-server.ts`
-  Registers MCP tools and handles tool calls.
-
-- `src/services/standards.service.ts`
-  Implements semantic search, chapter lookup, chunk lookup, section listing, result ranking, and exact-wording quote extraction.
-
-- `src/services/embeddings.ts`
-  Generates query embeddings through the Atlas AI Models embedding endpoint.
-
-- `src/db/mongo.ts`
-  Loads environment variables, creates a singleton Mongo client, and exposes the standards collection.
-
-- `src/utils/formatting.ts`
-  Formats evidence, renders verbatim chapters, and removes overlap/PDF artifacts during chapter reconstruction.
-
-## Prerequisites
+### Prerequisites
 
 - Node.js 18+
 - MongoDB Atlas cluster
-- MongoDB Atlas AI Models API key for embeddings
-- The DNV NIAHO PDF in the project root, or a custom path supplied through `NIAHO_PDF_PATH`
+- Atlas AI Models / Voyage API key
+- source NIAHO PDF available locally
 
-## Setup
-
-### 1. Install dependencies
+### Install
 
 ```bash
 npm install
-```
-
-### 2. Configure environment variables
-
-```bash
 cp .env.example .env
 ```
 
-Required values:
+Set at least these values in `.env`:
 
 ```env
 MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-url>/?appName=Cluster0
@@ -140,7 +71,26 @@ VOYAGE_EMBEDDINGS_URL=https://ai.mongodb.com/v1/embeddings
 EMBEDDING_MODEL=voyage-3-large
 ```
 
-Important operational variables:
+### Seed and Run
+
+```bash
+npm run seed
+npm run build
+npm run mcp
+```
+
+Useful variants:
+
+```bash
+npm run seed:dry-run
+RESET_COLLECTION=true npm run seed
+MAX_CHUNKS=50 npm run seed
+npm run mcp:dev
+```
+
+## Environment Variables
+
+Important operational settings:
 
 ```env
 VOYAGE_REQUESTS_PER_MINUTE=300
@@ -151,111 +101,78 @@ EMBEDDING_REQUEST_DELAY_MS=250
 EMBEDDING_MAX_RETRIES=5
 EMBEDDING_RETRY_DELAY_MS=5000
 
+EMBEDDING_COST_PER_1M_TOKENS=0
+LLM_INPUT_COST_PER_1M_TOKENS=0
+LLM_OUTPUT_COST_PER_1M_TOKENS=0
+ESTIMATED_LLM_COMPLETION_TOKENS=0
+
 RESET_COLLECTION=false
 DRY_RUN=false
 MAX_CHUNKS=0
-
 ```
 
 Notes:
 
-- `MAX_CHUNKS=0` means no seeding cap.
+- `MAX_CHUNKS=0` means no seed limit.
+- If pricing values stay `0`, the system still shows token estimates but dollar estimates remain zero.
 
-## MongoDB Atlas Setup
+## MCP Tools
 
-1. Create a cluster.
-2. Create database `niaho_standards`.
-3. Use collection `standards`.
-4. Allow your current IP or another approved development CIDR.
-5. Create an Atlas database user with read/write access.
-6. Create an Atlas AI Models API key for embeddings.
+Primary tools:
 
-### Vector Search Index
+- `search_standards(query, top_k)`
+- `get_standard_by_chapter(chapter_id)`
+- `list_sections(section_filter)`
 
-Create Atlas Vector Search index `vector_index` on `niaho_standards.standards`:
+Expected usage:
 
-```json
-{
-  "fields": [
-    {
-      "type": "vector",
-      "path": "embedding",
-      "numDimensions": 1024,
-      "similarity": "cosine"
-    },
-    {
-      "type": "filter",
-      "path": "metadata.chapter"
-    },
-    {
-      "type": "filter",
-      "path": "metadata.chapter_prefix"
-    }
-  ]
-}
+- Use `search_standards` for semantic questions.
+- Use `get_standard_by_chapter` for exact chapter text.
+- Use `list_sections` to discover chapter IDs before exact lookup.
+
+## Example Prompts
+
+- `Use only the healthcare-standards connector. What are the patient rights requirements?`
+- `Use only the healthcare-standards connector. Show me chapter QM.1 exactly.`
+- `Use only the healthcare-standards connector. Is there a chapter about hand hygiene?`
+- `Use only the healthcare-standards connector. Chapters related to patient safety.`
+
+## Architecture
+
+### Request Flow
+
+```mermaid
+flowchart TD
+    A[User Query] --> B[LLM / MCP Client]
+    B --> C{Choose Tool}
+    C -->|Semantic question| D[search_standards]
+    C -->|Exact chapter| E[get_standard_by_chapter]
+    C -->|Discovery| N[list_sections]
+    D --> F[src/mcp-server.ts]
+    E --> F
+    N --> F
+    F --> G[src/services/standards.service.ts]
+    G -->|Semantic path| H[Embeddings + Atlas Vector Search]
+    G -->|Direct path| I[Direct MongoDB chapter and section lookup]
+    H --> J[Filter and rank results]
+    I --> K[Render verbatim chapter]
+    J --> L[Format evidence]
+    K --> L
+    L --> M[MCP text response]
 ```
 
-## Seeding the Database
+### Main Components
 
-### Dry run
+- `src/mcp-server.ts`: MCP tool registration and dispatch
+- `src/services/standards.service.ts`: routing, retrieval, ranking, formatting decisions
+- `src/services/embeddings.ts`: query embedding generation
+- `src/db/mongo.ts`: MongoDB connection and collection access
+- `src/utils/formatting.ts`: evidence formatting and chapter reconstruction
+- `src/utils/cost-estimation.ts`: token and cost estimation per query
 
-```bash
-npm run seed:dry-run
-```
+## Data Model
 
-This performs PDF parsing, chunk generation, and batching analysis without requesting embeddings or writing to MongoDB.
-
-### Full seed
-
-```bash
-npm run seed
-```
-
-### Replace existing collection
-
-```bash
-RESET_COLLECTION=true npm run seed
-```
-
-### Limit the seed to a small sample
-
-```bash
-MAX_CHUNKS=50 npm run seed
-```
-
-## Current Chunking Strategy
-
-The current seeder uses a section-first strategy rather than SR-only slicing.
-
-- Primary split: chapter/subchapter sections
-- Target chunk range: `400` to `700` tokens
-- Hard split threshold: `800` tokens
-- Overlap: about `60` tokens, applied only when one oversized unit must be split
-- Long sections are split into smaller paragraph or bullet-group units
-- Standard sections retain `SR.*` awareness where available
-
-## Testing
-
-Run the lightweight smoke suite:
-
-```bash
-npm test
-```
-
-Current test coverage:
-
-- semantic retrieval sanity check for patient rights
-- exact chapter lookup sanity check for `PR.2`
-
-Why this approach:
-
-- preserves more local context for semantic search
-- reduces answer fragmentation from overly small SR-only chunks
-- keeps chunk sizes controlled for embedding cost and retrieval quality
-
-## Stored Document Shape
-
-Each document includes vector data plus structured metadata used for ranking, exact lookup, and chapter reconstruction.
+Stored documents include text, vector data, and metadata for exact retrieval and ranking.
 
 ```ts
 {
@@ -283,53 +200,154 @@ Each document includes vector data plus structured metadata used for ranking, ex
 }
 ```
 
-## MCP Server
+## MongoDB Atlas Setup
 
-### Build
+1. Create a cluster.
+2. Create database `niaho_standards`.
+3. Use collection `standards`.
+4. Allow your development IP.
+5. Create a database user with read/write access.
+6. Create an Atlas AI Models API key for embeddings.
 
-```bash
-npm run build
+### Vector Search Index
+
+Create vector index `vector_index` on `niaho_standards.standards`:
+
+```json
+{
+  "fields": [
+    {
+      "type": "Knnvector",
+      "path": "embedding",
+      "numDimensions": 1024,
+      "similarity": "cosine"
+    },
+    {
+      "type": "filter",
+      "path": "metadata.chapter"
+    },
+    {
+      "type": "filter",
+      "path": "metadata.chapter_prefix"
+    }
+  ]
+}
 ```
 
-### Run compiled server
+Recommended additional normal indexes:
 
-```bash
-npm run mcp
-```
+- ascending index on `metadata.chapter`
+- unique index on `chunk_id`
+- ascending index on `metadata.document`
 
-### Run in development
+## Chunking Strategy
 
-```bash
-npm run mcp:dev
-```
+The seeder uses section-first chunking rather than SR-only slicing.
 
-## Reviewer Connection Setup
+- target chunk size: `400` to `700` tokens
+- hard split threshold: `800` tokens
+- overlap: about `60` tokens only when splitting oversized units
+- ordering metadata is preserved for exact chapter reconstruction
 
-This section is the fastest path for a reviewer to connect the MCP server.
+Why this approach:
 
-Primary validated review path:
+- keeps more context for embeddings
+- reduces fragmented answers
+- makes exact chapter reconstruction cleaner
+- limits duplicated overlap text
 
-- Claude Desktop on macOS
+## Cost Tracking
 
-The project was validated using Claude-compatible MCP workflows during development.
+The connector now logs and returns an `estimated_cost` block for each query.
 
-### Option A: Claude Desktop on macOS
+Included estimates:
 
-This project exposes a local stdio MCP server, so Claude Desktop is the most direct way to review it locally.
+- embedding tokens used for semantic search queries
+- estimated LLM prompt tokens based on query plus MCP response size
+- optional estimated LLM completion tokens from env configuration
+- estimated USD cost when pricing values are configured
 
-1. Build the server:
+Important limitation:
 
-```bash
-npm run build
-```
+- this server does not call the final LLM directly, so LLM cost is an estimate of downstream consumption, not an exact billed amount from this process
 
-2. Open Claude Desktop config at:
+Example:
 
 ```text
-~/Library/Application Support/Claude/claude_desktop_config.json
+estimated_cost:
+pricing_configured: true
+embedding_tokens_estimate: 18
+llm_prompt_tokens_estimate: 264
+llm_completion_tokens_estimate: 150
+embedding_cost_usd_estimate: 0.000002
+llm_prompt_cost_usd_estimate: 0.000132
+llm_completion_cost_usd_estimate: 0.000075
+total_cost_usd_estimate: 0.000209
 ```
 
-3. Add this exact configuration snippet:
+## Scalability Plan
+
+To scale this from the current single-document prototype to 50+ documents and 10,000+ chunks, the main changes would be:
+
+### Indexing
+
+- keep the vector index on `embedding`
+- add normal indexes for `metadata.chapter`, `metadata.document`, and `chunk_id`
+- retain filterable metadata fields so vector retrieval can be narrowed before ranking
+
+### Ingestion
+
+- move from full reseeds to incremental ingestion
+- track source file version or hash per document
+- upsert only changed chunks instead of rebuilding everything
+- persist ingestion progress for restartable long-running jobs
+
+### Caching
+
+- cache query embeddings for repeated prompts
+- cache rendered chapter output for common exact lookups such as `QM.1`
+- cache frequent semantic search responses with short TTLs
+
+### Database Growth
+
+- a single indexed Atlas collection is fine for moderate growth
+- if sharding becomes necessary, shard on a high-cardinality source or tenant key rather than chapter ID
+- keep exact lookups targeted through normal indexes so they stay cheap
+
+### Application Changes
+
+- keep metadata filtering, candidate generation, ranking, and formatting as separate stages
+- add structured response metadata if you later want analytics dashboards or richer clients
+- move cost and query telemetry into centralized logging for monitoring
+
+## Testing
+
+Run the smoke suite:
+
+```bash
+npm test
+```
+
+Validated during development:
+
+- `npm run build`
+- `npm run seed:dry-run`
+- `RESET_COLLECTION=true npm run seed`
+- exact chapter lookups including `IC.1`, `QM.1`, `LS.2`
+- semantic retrieval checks for patient rights, hand hygiene, medication errors, and staff competency questions
+- local MCP client validation through Claude-compatible workflows
+
+Detailed examples are in `TEST_RESULTS.md`.
+
+## Claude Desktop Setup
+
+Build the server first:
+
+```bash
+npm run build
+```
+
+Then add this to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -344,136 +362,43 @@ npm run build
 }
 ```
 
-4. Fully quit and restart Claude Desktop.
+Restart Claude Desktop after saving the config.
 
-5. In a new Claude Desktop chat, test with prompts like:
+## Scripts
 
-```text
-Use only the healthcare-standards connector. Show me chapter LS.2 exactly.
+```bash
+npm run build
+npm run seed
+npm run seed:dry-run
+npm run mcp
+npm run mcp:dev
+npm run test
 ```
-
-```text
-Use only the healthcare-standards connector. What are the staff competency assessment requirements?
-```
-
-Notes:
-
-- The server reads environment variables from this project’s `.env` file at runtime.
-- The absolute path above is correct for this machine and repository location.
-- If the reviewer clones the repo somewhere else, they must replace the `args[0]` path with their local `dist/mcp-server.js` path.
-
-### Generic MCP Client Command
-
-For MCP-capable clients that use the same local stdio pattern, the server command is:
-
-```json
-{
-  "command": "node",
-  "args": [
-    "/Users/varunreddyseelam/Desktop/medlaunch_AI/dist/mcp-server.js"
-  ]
-}
-```
-
-This repository was validated in Claude-compatible workflows. Other clients may require a different UI-specific import flow, but the command and arguments stay the same.
-
-## Available MCP Tools
-
-Primary challenge-facing tools:
-
-- `search_standards(query, top_k)`
-- `get_standard_by_chapter(chapter_id)`
-- `list_sections(section_filter)`
-
-Compatibility aliases also exposed:
-
-- `get_standards_by_chapter(chapter)`
-- `get_standard_by_chunk_id(chunk_id)`
-- `list_chapters()`
-
-### Tool Behavior
-
-- `search_standards`
-  - embeds the query
-  - runs Atlas vector search when embeddings are available
-  - falls back to regex/text search if query embeddings fail
-  - includes direct quote extraction for exact-wording style prompts
-
-- `get_standard_by_chapter`
-  - returns verbatim chapter output
-  - reconstructs chapters in sorted order using `block_order` and `subchunk_index`
-  - removes repeated overlap and common PDF artifacts during rendering
-
-- `list_sections`
-  - lists chapters
-  - can filter by chapter prefix, section name, or heading text
-
-## Claude Desktop Example
-
-For convenience, the same Claude Desktop config is repeated here:
-
-```json
-{
-  "mcpServers": {
-    "healthcare-standards": {
-      "command": "node",
-      "args": ["/Users/varunreddyseelam/Desktop/medlaunch_AI/dist/mcp-server.js"]
-    }
-  }
-}
-```
-
-## Prompts we can use
-
-- `Use only the healthcare-standards connector. Show me chapter QM.1 exactly.`
-- `Use only the healthcare-standards connector. Is there a chapter about hand hygiene? Show me the exact wording.`
-- `Use only the healthcare-standards connector. Chapters related to patient safety.`
-- `Use only the healthcare-standards connector. What are the staff competency assessment requirements?`
-
-## Validation Performed
-
-Manual validation completed during development:
-
-- `npm run build`
-- `npm run seed:dry-run`
-- `RESET_COLLECTION=true npm run seed`
-- direct MongoDB inspection of selected chapters
-- exact chapter retrieval checks including `IC.1`, `SM.7`, and `LS.2`
-- semantic retrieval checks for:
-  - medication errors
-  - patient safety chapters
-  - patient rights
-  - hand hygiene
-  - staff competency assessment
-- Claude MCP workflow validation through local stdio server usage
-- documented test matrix in `TEST_RESULTS.md`
-
-There is currently no automated test suite wired into `npm test`.
-
 
 ## Design Choices
 
-### Dual-mode retrieval
+### Dual retrieval modes
 
-The system supports both exact retrieval and semantic retrieval because the challenge requires both citation-style lookup and broader natural-language search.
+The challenge needs both semantic search and exact citation lookup. Keeping both in one service makes the MCP layer simpler and avoids pushing retrieval logic into the client.
 
 ### Section-first chunking
 
-Earlier, finer-grained chunks made some answers incomplete. Larger section-scoped chunks improved retrieval context and reduced answer fragmentation.
+Very small SR-only chunks improved precision but often lost context. Section-first chunking gives embeddings more meaningful context while still keeping chunk sizes controlled.
 
-### Cost-aware batching
+### Thin MCP layer
 
-Embedding requests are throttled and batched conservatively using RPM/TPM caps and retry delays to avoid rate-limit churn and control spend.
+`src/mcp-server.ts` only registers tools and dispatches requests. Retrieval and formatting logic stay in services so they are easier to reason about and test.
 
-### Exact chapter cleanup at render time
+### Conservative embedding controls
 
-Instead of forcing a reseed to fix every PDF artifact, chapter rendering removes overlap and common PDF header/footer artifacts during reconstruction.
+Batch limits, retry delays, and cost estimation make seeding slower but more predictable and easier to operate.
 
 ## Known Limitations
 
-- Answer quality still depends on the client model following the retrieved evidence faithfully.
-- There is no automated regression test suite yet.
-- Some PDF extraction oddities may still survive if they are not part of the currently filtered artifact patterns.
+- answer quality still depends on the downstream model following retrieved evidence faithfully
+- PDF extraction artifacts may still survive in some edge cases
+- LLM cost is estimated, not directly metered from the client runtime
+- the automated tests are still a lightweight smoke suite, not a full regression suite
 
 ## Troubleshooting
 
@@ -481,43 +406,41 @@ Instead of forcing a reseed to fix every PDF artifact, chapter rendering removes
 
 Set `MONGODB_URI` in `.env`.
 
-### Query search falls back to text search
+### Semantic search falls back to text search
 
-This usually means the embedding request failed or `VOYAGE_API_KEY` is missing.
+Usually `VOYAGE_API_KEY` is missing or the embedding request failed.
 
-### Seeder fails on embeddings
+### Seeder fails during embeddings
 
 Check:
 
-- Atlas AI Models key
-- network access
-- batch limits in `.env`
-- retry settings for rate-limit recovery
+- API key
+- Atlas/network access
+- batch limits
+- retry settings
 
-### No chapter results returned
+### Exact chapter lookup returns nothing
 
-Check that:
+Check:
+
 - the collection is seeded
 - the chapter exists in `metadata.chapter`
-- the chapter ID format matches the stored form, for example `QM.8` or `LS.2`
-
-## Scripts
-
-```bash
-npm run build # builds the MCP server for Claude Desktop
-npm run seed # parses the PDF, generates embeddings, and inserts chunks into MongoDB Atlas
-npm run seed:dry-run # validates parsing and chunking without embeddings or database writes
-npm run search # runs a direct vector-search sanity check against the Atlas collection
-npm run mcp # starts the compiled MCP server from dist/
-npm run mcp:dev # starts the MCP server directly from TypeScript source for local development
-```
+- the chapter format matches stored values such as `QM.1` or `LS.2`
 
 ## Submission Notes
 
-This implementation targets the MCP-server delivery path and prioritizes:
+Implemented in this repository:
 
-- clean tool boundaries
-- grounded retrieval behavior
-- reproducible seeding
-- Atlas-native vector search
-- operational controls for embedding cost and reliability
+- seeder
+- MCP server
+- retrieval logic
+- environment template
+- README
+- test results
+
+Manual artifacts still useful for final submission:
+
+- Atlas cluster screenshot
+- Atlas collection screenshot
+- Atlas vector index screenshot
+- MCP client screenshots or screen recording

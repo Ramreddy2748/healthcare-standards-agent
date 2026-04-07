@@ -17,7 +17,7 @@ export function summarizeText(text: string, maxLength: number = 700): string {
   return `${normalized.slice(0, maxLength).trim()}...`;
 }
 
-export function formatEvidence(doc: StandardDocument, includeScore: boolean = false): string {
+export function formatEvidence(doc: StandardDocument, includeScore: boolean = false, excerptLength: number = 700): string {
   const lines: string[] = [];
   lines.push(`chapter_id: ${doc.metadata?.chapter ?? 'unknown'}`);
   lines.push(`section_name: ${doc.metadata?.section ?? 'unknown'}`);
@@ -31,7 +31,7 @@ export function formatEvidence(doc: StandardDocument, includeScore: boolean = fa
   if (includeScore && typeof doc.score === 'number') {
     lines.push(`relevance_score: ${doc.score.toFixed(4)}`);
   }
-  lines.push(`excerpt: ${summarizeText(doc.text)}`);
+  lines.push(`excerpt: ${summarizeText(doc.text, excerptLength)}`);
   return lines.join('\n');
 }
 
